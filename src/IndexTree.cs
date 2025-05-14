@@ -4,6 +4,10 @@ using System.Linq;
 
 namespace BTreeIndex {
     public class IndexTree {
+        /*
+            Tem que refazer essa merda toda, pra ser só uma classe
+            que manipula o arquivo txt
+        */
         private readonly int order;
         private IndexNode root;
 
