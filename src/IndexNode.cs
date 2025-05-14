@@ -1,28 +1,39 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace BTreeIndex {
-    public enum NodeType {
-        Leaf,
-        Internal
-    }
-
     public class IndexNode {
+        public int id { get; set; }
         public bool isLeaf { get; set; }
-        public List<int> keys { get; set; }  // ano_colheita
-        public int parent { get; set; }
-        public List<int> children { get; set; }
-        public int prev { get; set; }
-        public int next { get; set; }
-        public List<List<int>> refs { get; set; }  // linhas
+        public List<int> keys { get; set; } = new List<int>();
+        public int parent { get; set; } = -1;
+        public List<int> children { get; set; } = new List<int>();
+        public int prev { get; set; } = -1;
+        public int next { get; set; } = -1;
+        public List<List<int>> refs { get; set; } = new List<List<int>>();
 
-        public IndexNode(bool isLeaf, List<int> keys, int parent, List<int> children, int prev, int next, List<List<int>> refs) {
-            this.isLeaf = isLeaf;
-            this.keys = keys;
-            this.parent = parent;
-            this.children = children;
-            this.prev = prev;
-            this.next = next;
-            this.refs = refs;
+        public string Serialize() {
+            string keysStr = string.Join(",", keys);
+            string childrenStr = children.Count > 0 ? string.Join(",", children) : "null";
+            string refsStr = refs.Count > 0 ? string.Join(":", refs.Select(l => string.Join(",", l))) : "null";
+
+            return $"{id};{(isLeaf ? 1 : 0)};{keysStr};{parent};{childrenStr};{(prev == -1 ? "null" : prev.ToString())};{(next == -1 ? "null" : next.ToString())};{refsStr}";
+        }
+
+        public static IndexNode Deserialize(string line) {
+            var parts = line.Split(';');
+            var node = new IndexNode {
+                id = int.Parse(parts[0]),
+                isLeaf = parts[1] == "1",
+                keys = parts[2] == "" ? new List<int>() : parts[2].Split(',').Select(int.Parse).ToList(),
+                parent = int.Parse(parts[3]),
+                children = parts[4] == "null" ? new List<int>() : parts[4].Split(',').Select(int.Parse).ToList(),
+                prev = parts[5] == "null" ? -1 : int.Parse(parts[5]),
+                next = parts[6] == "null" ? -1 : int.Parse(parts[6]),
+                refs = parts[7] == "null" ? new List<List<int>>() : parts[7].Split(':').Select(s => s.Split(',').Select(int.Parse).ToList()).ToList()
+            };
+            return node;
         }
     }
 }
