@@ -5,6 +5,16 @@ using System.Linq;
 using System.Text;
 
 namespace BTreeIndex {
+    /*
+    O arquivo .txt possui um formato
+    id;leaf;keys;parent;children;prev;next;refs
+    Separados por ponto e vírgula, e valores multivariados
+    são separados por vírgulas (no caso de keys, children e refs).
+    A primeira linha do arquivo possui alguns metadados importantes,
+    sendo esses o rootId e o nextId, sendo o id da raíz, e o próximo id
+    possível, respectivamente. Para facilitar nossas vidas, decidimos 
+    que o id de cada nó é exatamente igual à sua posição no arquivo.
+    */
     public class IndexTree {
         private readonly int order;
         private readonly string filePath;
@@ -12,6 +22,7 @@ namespace BTreeIndex {
 
         private int pageSize;
 
+        // Construtor, se passa a ordem e o caminho para o .txt
         public IndexTree(int order, string filePath) {
             this.order = order;
             this.pageSize = this.setPageSize(order);
@@ -26,10 +37,18 @@ namespace BTreeIndex {
             }
         }
 
+        /*
+        Calcula automaticamente o tamanho necessário de cada
+        página (linha do .txt) a partir da ordem da árvore
+        */
         public int setPageSize(int order) {
             return 37 + 12*order;
         }
 
+        /*
+        Método auxiliar para escrever uma linha no tamanho fixo
+        setado pelo método anterior
+        */
         public void WriteFixedLine(int line, string content) {
             Encoding encoding = Encoding.ASCII;
             byte[] bytes = encoding.GetBytes(content);
@@ -50,32 +69,48 @@ namespace BTreeIndex {
             }
         }
 
+        /*
+        Método de busca por chave, se retorna uma
+        lista com todas as referências (linhas do .csv) nela
+        */
         public List<int> Search(int key) {
             LoadNode(GetRootId());
             List<int> references = new List<int>();
+            bool gotToEnd = false;
 
             while (!nodeBuffer.isLeaf) {
                 int i = 0;
-                while (i < nodeBuffer.keys.Count && key >= nodeBuffer.keys[i]) i++;
+                while (i < nodeBuffer.keys.Count && key > nodeBuffer.keys[i]) i++;
                 LoadNode(nodeBuffer.children[i]);
             }
 
-            for (int i = 0; i < nodeBuffer.keys.Count; i++) {
-                if (nodeBuffer.keys[i] == key) {
-                    references.Add(nodeBuffer.refs[i]);
-                } else if (nodeBuffer.keys[i] > key) {
-                    break;
+            while (!gotToEnd) {
+                for (int i = 0; i < nodeBuffer.keys.Count; i++) {
+                    if (nodeBuffer.keys[i] == key) {
+                        references.Add(nodeBuffer.refs[i]);
+                        Console.WriteLine(nodeBuffer.refs[i]);
+                    } else if (nodeBuffer.keys[i] > key) {
+                        gotToEnd = true;
+                    }
                 }
+
+                LoadNode(nodeBuffer.next);
             }
 
             return references;
         }
 
+        // Seta ou reseta o id da raíz
         public void WriteRootId(int rootId) {
             int nextId = GetNextId();
             WriteFixedLine(0, $"nextId:{nextId};rootId:{rootId}");
         }
 
+        /*
+        Método de alto nível para inserção.
+        Utilizamos uma pilha para lembrar os ids que passamos
+        durante a ida até a folha em questão.
+        */
         public void Insert(int key, int refId) {
             Stack<int> path = new Stack<int>();
             LoadNode(GetRootId()); // raiz
@@ -96,6 +131,10 @@ namespace BTreeIndex {
             }
         }
 
+        /*
+        Método para inserir um nó numa folha que possui espaço,
+        reescrevendo-a no arquivo .txt
+        */
         private void InsertInLeaf(int key, int refId) {
             int i = 0;
             while (i < nodeBuffer.keys.Count && key > nodeBuffer.keys[i]) i++;
@@ -103,6 +142,11 @@ namespace BTreeIndex {
             nodeBuffer.refs.Insert(i, refId);
         }
 
+        /*
+        Método para splitar uma folha, fazendo com que até a metade dela
+        permaneça na linha original, e a segunda metade vá para uma nova
+        linha.
+        */
         private void SplitLeaf(Stack<int> path) {
             int mid = (nodeBuffer.keys.Count + 1) / 2;
 
@@ -194,6 +238,10 @@ namespace BTreeIndex {
             }
         }
 
+        /*
+        Similar ao splitleaf, para nós internos, mas também trata
+        quando precisamos fazer o split interno mais de uma vez.
+        */
         private void SplitInternal(Stack<int> path) {
             int mid = nodeBuffer.keys.Count / 2;
             int promotedKey = nodeBuffer.keys[mid];
@@ -268,6 +316,7 @@ namespace BTreeIndex {
             }
         }
 
+        // Método para atualizar o buffer com um novo nó
         private void LoadNode(int id) {
             using (FileStream fs = new FileStream(this.filePath, FileMode.Open, FileAccess.Read)) {
                 fs.Seek(id * this.pageSize, SeekOrigin.Begin);
@@ -279,6 +328,11 @@ namespace BTreeIndex {
             }
         }
 
+        /*
+        Método para escrever um nó no arquivo.txt
+        Possui um booleano dizendo se é para incluir um novo nó, ou
+        apenas reescrever um. Isso é importante para atualizar o nextId
+        */
         public void WriteNode(IndexNode node, bool rewrite) {
             int nextId = rewrite ? node.id : this.GetNextId();
             WriteFixedLine(nextId, node.Serialize());
@@ -289,6 +343,9 @@ namespace BTreeIndex {
             }
         }
 
+        /*
+        Getters do nextId, rootId e height
+        */
         public int GetNextId() {
             int nextId = 0;
             
@@ -325,6 +382,18 @@ namespace BTreeIndex {
             }
 
             return rootId;
+        }
+
+        public int GetHeight() {
+            LoadNode(GetRootId());
+            int height = 0;
+
+            while (!nodeBuffer.isLeaf) {
+                LoadNode(nodeBuffer.children[0]);
+                height++;
+            }
+
+            return height;
         }
     }
 }
