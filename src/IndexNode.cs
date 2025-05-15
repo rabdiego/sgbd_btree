@@ -11,12 +11,12 @@ namespace BTreeIndex {
         public List<int> children { get; set; } = new List<int>();
         public int prev { get; set; } = -1;
         public int next { get; set; } = -1;
-        public List<List<int>> refs { get; set; } = new List<List<int>>();
+        public List<int> refs { get; set; } = new List<int>();
 
         public string Serialize() {
             string keysStr = string.Join(",", keys);
             string childrenStr = children.Count > 0 ? string.Join(",", children) : "null";
-            string refsStr = refs.Count > 0 ? string.Join(":", refs.Select(l => string.Join(",", l))) : "null";
+            string refsStr = string.Join(",", refs);
 
             return $"{id};{(isLeaf ? 1 : 0)};{keysStr};{parent};{childrenStr};{(prev == -1 ? "null" : prev.ToString())};{(next == -1 ? "null" : next.ToString())};{refsStr}";
         }
@@ -31,7 +31,7 @@ namespace BTreeIndex {
                 children = parts[4] == "null" ? new List<int>() : parts[4].Split(',').Select(int.Parse).ToList(),
                 prev = parts[5] == "null" ? -1 : int.Parse(parts[5]),
                 next = parts[6] == "null" ? -1 : int.Parse(parts[6]),
-                refs = parts[7] == "null" ? new List<List<int>>() : parts[7].Split(':').Select(s => s.Split(',').Select(int.Parse).ToList()).ToList()
+                refs = parts[7] == "" ? new List<int>() : parts[7].Split(',').Select(int.Parse).ToList()
             };
             return node;
         }

@@ -2,183 +2,329 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 
 namespace BTreeIndex {
     public class IndexTree {
         private readonly int order;
         private readonly string filePath;
-        private int rootId = 0;
+        private IndexNode nodeBuffer;
+
+        private int pageSize;
 
         public IndexTree(int order, string filePath) {
             this.order = order;
+            this.pageSize = this.setPageSize(order);
             this.filePath = filePath;
             if (!File.Exists(filePath) || new FileInfo(filePath).Length == 0) {
-                var root = new IndexNode { id = 0, isLeaf = true };
-                File.WriteAllLines(filePath, new[] { root.Serialize() });
+                nodeBuffer = new IndexNode { id = 2, isLeaf = true };
+                File.Create(filePath).Close();
+
+                WriteFixedLine(0, "nextId:3;rootId:2");
+                WriteFixedLine(1, "id;leaf;keys;parent;children;prev;next;refs");
+                WriteFixedLine(2, nodeBuffer.Serialize());
             }
         }
 
-        public void Insert(int key, int lineRef) {
-            var node = ReadNode(rootId);
-            var splitResult = InternalInsert(node, key, lineRef);
+        public int setPageSize(int order) {
+            return 37 + 12*order;
+        }
 
-            if (splitResult != null) {
-                var newRoot = new IndexNode {
-                    id = GetNextId(),
-                    isLeaf = false,
-                    keys = new List<int> { splitResult.Item1 },
-                    children = new List<int> { rootId, splitResult.Item2 }
-                };
+        public void WriteFixedLine(int line, string content) {
+            Encoding encoding = Encoding.ASCII;
+            byte[] bytes = encoding.GetBytes(content);
 
-                WriteNode(newRoot);
-                rootId = newRoot.id;
+            if (bytes.Length > this.pageSize - 1)
+                throw new InvalidOperationException($"Line too long for fixed size of {this.pageSize}");
+
+            byte[] padded = new byte[this.pageSize];
+            Array.Copy(bytes, padded, bytes.Length);
+
+            for (int i = bytes.Length; i < this.pageSize - 1; i++)
+                padded[i] = (byte)' ';
+            padded[this.pageSize - 1] = (byte)'\n';
+
+            using (FileStream fs = new FileStream(this.filePath, FileMode.Open, FileAccess.Write)) {
+                fs.Seek(line * this.pageSize, SeekOrigin.Begin);
+                fs.Write(padded, 0, this.pageSize);
             }
         }
 
-        private Tuple<int, int> InternalInsert(IndexNode node, int key, int lineRef) {
-            if (node.isLeaf) {
-                int pos = node.keys.BinarySearch(key);
-                if (pos < 0) pos = ~pos;
+        public List<int> Search(int key) {
+            LoadNode(GetRootId());
+            List<int> references = new List<int>();
 
-                node.keys.Insert(pos, key);
-                node.refs.Insert(pos, new List<int> { lineRef });
+            while (!nodeBuffer.isLeaf) {
+                int i = 0;
+                while (i < nodeBuffer.keys.Count && key >= nodeBuffer.keys[i]) i++;
+                LoadNode(nodeBuffer.children[i]);
+            }
 
-                if (node.keys.Count > order) {
-                    return SplitLeaf(node);
-                } else {
-                    WriteNode(node);
-                    return null;
+            for (int i = 0; i < nodeBuffer.keys.Count; i++) {
+                if (nodeBuffer.keys[i] == key) {
+                    references.Add(nodeBuffer.refs[i]);
+                } else if (nodeBuffer.keys[i] > key) {
+                    break;
                 }
+            }
+
+            return references;
+        }
+
+        public void WriteRootId(int rootId) {
+            int nextId = GetNextId();
+            WriteFixedLine(0, $"nextId:{nextId};rootId:{rootId}");
+        }
+
+        public void Insert(int key, int refId) {
+            Stack<int> path = new Stack<int>();
+            LoadNode(GetRootId()); // raiz
+
+            while (!nodeBuffer.isLeaf) {
+                path.Push(nodeBuffer.id);
+                int i = 0;
+                while (i < nodeBuffer.keys.Count && key >= nodeBuffer.keys[i]) i++;
+                LoadNode(nodeBuffer.children[i]);
+            }
+
+            InsertInLeaf(key, refId);
+
+            if (nodeBuffer.keys.Count > order) {
+                SplitLeaf(path);
             } else {
-                int i = node.keys.BinarySearch(key);
-                if (i < 0) i = ~i;
-                int childId = node.children[i];
-
-                var childNode = ReadNode(childId);
-                var result = InternalInsert(childNode, key, lineRef);
-
-                if (result != null) {
-                    int middleKey = result.Item1;
-                    int newChildId = result.Item2;
-
-                    int insertPos = node.keys.BinarySearch(middleKey);
-                    if (insertPos < 0) insertPos = ~insertPos;
-                    node.keys.Insert(insertPos, middleKey);
-                    node.children.Insert(insertPos + 1, newChildId);
-
-                    if (node.keys.Count > order) {
-                        return SplitInternal(node);
-                    } else {
-                        WriteNode(node);
-                    }
-                } else {
-                    WriteNode(node);
-                }
-
-                return null;
+                WriteNode(nodeBuffer, true);
             }
         }
 
-        private Tuple<int, int> SplitLeaf(IndexNode leaf) {
-            int newId = GetNextId();
-            var newLeaf = new IndexNode {
-                id = newId,
-                isLeaf = true,
-                parent = leaf.parent
-            };
-
-            int mid = leaf.keys.Count / 2;
-
-            newLeaf.keys.AddRange(leaf.keys.Skip(mid));
-            newLeaf.refs.AddRange(leaf.refs.Skip(mid));
-
-            leaf.keys.RemoveRange(mid, leaf.keys.Count - mid);
-            leaf.refs.RemoveRange(mid, leaf.refs.Count - mid);
-
-            newLeaf.next = leaf.next;
-            newLeaf.prev = leaf.id;
-            leaf.next = newId;
-
-            WriteNode(leaf);
-            WriteNode(newLeaf);
-            UpdateNeighborLinks(newLeaf);
-
-            return Tuple.Create(newLeaf.keys[0], newId);
+        private void InsertInLeaf(int key, int refId) {
+            int i = 0;
+            while (i < nodeBuffer.keys.Count && key > nodeBuffer.keys[i]) i++;
+            nodeBuffer.keys.Insert(i, key);
+            nodeBuffer.refs.Insert(i, refId);
         }
 
-        private Tuple<int, int> SplitInternal(IndexNode node) {
-            int newId = GetNextId();
-            int mid = node.keys.Count / 2;
+        private void SplitLeaf(Stack<int> path) {
+            int mid = (nodeBuffer.keys.Count + 1) / 2;
 
-            var newNode = new IndexNode {
-                id = newId,
-                isLeaf = false,
-                parent = node.parent
-            };
+            List<int> newKeys = nodeBuffer.keys.GetRange(mid, nodeBuffer.keys.Count - mid);
+            List<int> newRefs = nodeBuffer.refs.GetRange(mid, nodeBuffer.refs.Count - mid);
 
-            newNode.keys.AddRange(node.keys.Skip(mid + 1));
-            newNode.children.AddRange(node.children.Skip(mid + 1));
+            nodeBuffer.keys.RemoveRange(mid, nodeBuffer.keys.Count - mid);
+            nodeBuffer.refs.RemoveRange(mid, nodeBuffer.refs.Count - mid);
 
-            int middleKey = node.keys[mid];
+            int newLeafId = GetNextId();
 
-            node.keys.RemoveRange(mid, node.keys.Count - mid);
-            node.children.RemoveRange(mid + 1, node.children.Count - (mid + 1));
+            // Salva o leaf atual antes de carregar novo conteúdo
+            int oldNext = nodeBuffer.next;
+            int oldId = nodeBuffer.id;
+            int oldParent = nodeBuffer.parent;
 
-            WriteNode(node);
-            WriteNode(newNode);
+            WriteNode(nodeBuffer, true);
 
-            return Tuple.Create(middleKey, newId);
-        }
+            // Cria novo nó folha no buffer
+            nodeBuffer.id = newLeafId;
+            nodeBuffer.isLeaf = true;
+            nodeBuffer.keys = newKeys;
+            nodeBuffer.refs = newRefs;
+            nodeBuffer.prev = oldId;
+            nodeBuffer.next = oldNext;
+            nodeBuffer.parent = oldParent;
+            nodeBuffer.children = new List<int>();
 
-        private void UpdateNeighborLinks(IndexNode newLeaf) {
-            if (newLeaf.next != -1) {
-                var nextNode = ReadNode(newLeaf.next);
-                nextNode.prev = newLeaf.id;
-                WriteNode(nextNode);
-            }
-        }
+            WriteNode(nodeBuffer, false);
 
-        private IndexNode ReadNode(int id) {
-            var sr = new StreamReader(filePath);
-            for (int i = 0; i <= id; i++) {
-                var line = sr.ReadLine();
-                if (i == id) {
-                    sr.Dispose();
-                    return IndexNode.Deserialize(line);
-                }
-            }
-            sr.Dispose();
-            throw new Exception($"Node {id} not found");
-        }
+            // Atualiza ponteiro next do antigo leaf
+            LoadNode(oldId);
+            nodeBuffer.next = newLeafId;
+            WriteNode(nodeBuffer, true);
 
-        public void WriteNode(IndexNode node) {
-            // Read the entire file and keep it in memory
-            List<string> lines;
-            using (var reader = new StreamReader(filePath)) {
-                lines = reader.ReadToEnd().Split('\n').ToList();
+            // Atualiza ponteiro prev do antigo next (se existir)
+            if (oldNext != -1) {
+                LoadNode(oldNext);
+                nodeBuffer.prev = newLeafId;
+                WriteNode(nodeBuffer, true);
             }
 
-            // Modify or add the node representation (this depends on your logic)
-            string nodeLine = node.Serialize();
-            int index = lines.FindIndex(line => line.StartsWith(node.id.ToString())); // Find node by ID
-            if (index >= 0) {
-                // If node exists, update it
-                lines[index] = nodeLine;
+            // Carrega o novo leaf de volta para obter chave promovida
+            LoadNode(newLeafId);
+            int promotedKey = nodeBuffer.keys[0];
+
+            if (path.Count == 0) {
+                // Criar nova raiz
+                int newRootId = GetNextId();
+                int leftChildId = oldId;
+                int rightChildId = newLeafId;
+
+                // Prepara buffer como nova raiz
+                nodeBuffer.id = newRootId;
+                nodeBuffer.isLeaf = false;
+                nodeBuffer.keys = new List<int> { promotedKey };
+                nodeBuffer.children = new List<int> { leftChildId, rightChildId };
+                nodeBuffer.parent = -1;
+                nodeBuffer.refs = new List<int>();
+                nodeBuffer.prev = -1;
+                nodeBuffer.next = -1;
+
+                WriteNode(nodeBuffer, false);
+
+                // Atualiza pais dos filhos
+                LoadNode(leftChildId);
+                nodeBuffer.parent = newRootId;
+                WriteNode(nodeBuffer, true);
+
+                LoadNode(rightChildId);
+                nodeBuffer.parent = newRootId;
+                WriteNode(nodeBuffer, true);
+                WriteRootId(newRootId);
             } else {
-                // If node doesn't exist, add it
-                lines.Add(nodeLine);
-            }
+                int parentId = path.Pop();
+                LoadNode(parentId);
 
-            // Write back to the file (overwriting the entire content)
-            using (var writer = new StreamWriter(filePath, false)) {
-                foreach (var line in lines) {
-                    writer.WriteLine(line);
+                int insertIndex = 0;
+                while (insertIndex < nodeBuffer.keys.Count && promotedKey > nodeBuffer.keys[insertIndex]) insertIndex++;
+
+                nodeBuffer.keys.Insert(insertIndex, promotedKey);
+                nodeBuffer.children.Insert(insertIndex + 1, newLeafId);
+
+                WriteNode(nodeBuffer, true);
+
+                if (nodeBuffer.keys.Count > order) {
+                    SplitInternal(path);
                 }
             }
         }
 
-        private int GetNextId() {
-            return File.ReadAllLines(filePath).Length;
+        private void SplitInternal(Stack<int> path) {
+            int mid = nodeBuffer.keys.Count / 2;
+            int promotedKey = nodeBuffer.keys[mid];
+
+            List<int> rightKeys = nodeBuffer.keys.GetRange(mid + 1, nodeBuffer.keys.Count - (mid + 1));
+            List<int> rightChildren = nodeBuffer.children.GetRange(mid + 1, nodeBuffer.children.Count - (mid + 1));
+
+            int newNodeId = GetNextId();
+            int leftNodeId = nodeBuffer.id;
+            int oldParent = nodeBuffer.parent;
+
+            nodeBuffer.keys.RemoveRange(mid, nodeBuffer.keys.Count - mid);
+            nodeBuffer.children.RemoveRange(mid + 1, nodeBuffer.children.Count - (mid + 1));
+
+            WriteNode(nodeBuffer, true); // salva nó esquerdo
+
+            // monta nó direito no buffer
+            nodeBuffer.id = newNodeId;
+            nodeBuffer.isLeaf = false;
+            nodeBuffer.keys = rightKeys;
+            nodeBuffer.children = rightChildren;
+            nodeBuffer.parent = oldParent;
+            nodeBuffer.refs = new List<int>();
+            nodeBuffer.prev = -1;
+            nodeBuffer.next = -1;
+
+            WriteNode(nodeBuffer, false); // salva nó direito
+
+            // atualiza os pais dos filhos do novo nó
+            foreach (int childId in rightChildren) {
+                LoadNode(childId);
+                nodeBuffer.parent = newNodeId;
+                WriteNode(nodeBuffer, true);
+            }
+
+            if (path.Count == 0) {
+                int newRootId = GetNextId();
+
+                nodeBuffer.id = newRootId;
+                nodeBuffer.isLeaf = false;
+                nodeBuffer.keys = new List<int> { promotedKey };
+                nodeBuffer.children = new List<int> { leftNodeId, newNodeId };
+                nodeBuffer.parent = -1;
+                nodeBuffer.refs = new List<int>();
+                nodeBuffer.prev = -1;
+                nodeBuffer.next = -1;
+
+                WriteNode(nodeBuffer, false);
+
+                LoadNode(leftNodeId);
+                nodeBuffer.parent = newRootId;
+                WriteNode(nodeBuffer, true);
+
+                LoadNode(newNodeId);
+                nodeBuffer.parent = newRootId;
+                WriteNode(nodeBuffer, true);
+                WriteRootId(newRootId);
+            } else {
+                int parentId = path.Pop();
+                LoadNode(parentId);
+
+                int insertIndex = 0;
+                while (insertIndex < nodeBuffer.keys.Count && promotedKey > nodeBuffer.keys[insertIndex]) insertIndex++;
+
+                nodeBuffer.keys.Insert(insertIndex, promotedKey);
+                nodeBuffer.children.Insert(insertIndex + 1, newNodeId);
+
+                WriteNode(nodeBuffer, true);
+
+                if (nodeBuffer.keys.Count > order)
+                    SplitInternal(path);
+            }
+        }
+
+        private void LoadNode(int id) {
+            using (FileStream fs = new FileStream(this.filePath, FileMode.Open, FileAccess.Read)) {
+                fs.Seek(id * this.pageSize, SeekOrigin.Begin);
+                byte[] buffer = new byte[this.pageSize];
+                fs.Read(buffer, 0, this.pageSize);
+                string line = Encoding.ASCII.GetString(buffer).Trim();
+                nodeBuffer = IndexNode.Deserialize(line);
+                nodeBuffer.id = id;
+            }
+        }
+
+        public void WriteNode(IndexNode node, bool rewrite) {
+            int nextId = rewrite ? node.id : this.GetNextId();
+            WriteFixedLine(nextId, node.Serialize());
+
+            if (!rewrite) {
+                int rootId = GetRootId();
+                WriteFixedLine(0, $"nextId:{nextId + 1};rootId:{rootId}");
+            }
+        }
+
+        public int GetNextId() {
+            int nextId = 0;
+            
+            using (FileStream fs = new FileStream(this.filePath, FileMode.Open, FileAccess.Read)) {
+                fs.Seek(0, SeekOrigin.Begin);
+
+                byte[] buffer = new byte[this.pageSize];
+                int bytesRead = fs.Read(buffer, 0, this.pageSize);
+
+                if (bytesRead > 0) {
+                    string line = Encoding.ASCII.GetString(buffer).Trim();
+                    string idString = line.Split(';')[0].Split(':')[1];
+                    int.TryParse(idString, out nextId);
+                }
+            }
+
+            return nextId;
+        }
+
+        public int GetRootId() {
+            int rootId = 0;
+            
+            using (FileStream fs = new FileStream(this.filePath, FileMode.Open, FileAccess.Read)) {
+                fs.Seek(0, SeekOrigin.Begin);
+
+                byte[] buffer = new byte[this.pageSize];
+                int bytesRead = fs.Read(buffer, 0, this.pageSize);
+
+                if (bytesRead > 0) {
+                    string line = Encoding.ASCII.GetString(buffer).Trim();
+                    string idString = line.Split(';')[1].Split(':')[1];
+                    int.TryParse(idString, out rootId);
+                }
+            }
+
+            return rootId;
         }
     }
 }
